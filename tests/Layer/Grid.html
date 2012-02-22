@@ -2,6 +2,10 @@
 <head>
   <script src="../OLLoader.js"></script>
   <script type="text/javascript">
+    // turn off animation frame handling, so we can check img urls in tests
+    var origQueueTileDraw = OpenLayers.Layer.Grid.prototype.queueTileDraw;
+    delete OpenLayers.Layer.Grid.prototype.queueTileDraw;
+
     var isMozilla = (navigator.userAgent.indexOf("compatible") == -1);
     var layer; 
 
@@ -21,13 +25,14 @@
 
 
     function test_Layer_Grid_constructor (t) {
-        t.plan( 5 );
+        t.plan( 6 );
                        
         layer = new OpenLayers.Layer.Grid(name, url, params, null);
         t.ok( layer instanceof OpenLayers.Layer.Grid, "returns OpenLayers.Layer.Grid object" );
         t.eq( layer.buffer, 0, "buffer default is 0");
         t.eq( layer.ratio, 1.5, "ratio default is 1.5");
         t.eq( layer.numLoadingTiles, 0, "numLoadingTiles starts at 0");
+        t.eq( layer.tileClass, OpenLayers.Tile.Image, "tileClass default is OpenLayers.Tile.Image");
 
         var obj = {};
         var func = function() {};
@@ -46,6 +51,45 @@
         t.eq( layer.grid.length, 7, "Grid rows is correct." );
         t.eq( layer.grid[0].length, 6, "Grid cols is correct." );
         
+    }
+
+    function test_Layer_Grid_tileClass(t) {
+        t.plan(2);
+
+        var myTileClass = OpenLayers.Class(OpenLayers.Tile, {});
+        var map = new OpenLayers.Map('map');
+        layer = new OpenLayers.Layer.WMS(name, url, params, {
+            tileClass: myTileClass
+        });
+        map.addLayer(layer);
+
+        t.eq(layer.tileClass, myTileClass, "tileClass is set");
+        var instance = layer.addTile(new OpenLayers.Bounds(-10, 10, 50, 100),
+                                     new OpenLayers.Pixel(10, 12));
+
+        t.ok(instance instanceof myTileClass, "addTile returns type is correct");
+
+        map.destroy();
+    }
+    
+    function test_queueTileDraw(t) {
+        t.plan(3);
+        OpenLayers.Layer.Grid.prototype.queueTileDraw = origQueueTileDraw;
+
+        var map = new OpenLayers.Map('map');
+        layer = new OpenLayers.Layer.WMS(name, url, params);
+        map.addLayer(layer);
+        map.setCenter([0, 0], 3);
+        var queued = layer.tileQueue.length;
+        t.ok(layer.tileQueue.length, "Tiles queued for drawing");
+        map.zoomIn();
+        t.eq(layer.tileQueue.length, queued, "Tile queue has same length after immediate zoom change");
+        t.delay_call(1, function() {
+            t.eq(layer.tileQueue.length, 0, "Tiles from queue processed");
+        });
+        
+        map.destroy();
+        delete OpenLayers.Layer.Grid.prototype.queueTileDraw;
     }
 
     function test_Layer_Grid_clearTiles (t) {
@@ -94,14 +138,14 @@
 
 
     function test_Layer_Grid_getTilesBounds(t) {
-        t.plan(3);
+        t.plan(4);
 
         layer = new OpenLayers.Layer.WMS(name, url, params);
 
 
     //normal grid
-        var bl = { bounds: new OpenLayers.Bounds(1,2,0,0)};
-        var tr = { bounds: new OpenLayers.Bounds(0,0,3,4)};
+        var bl = { bounds: new OpenLayers.Bounds(1,2,2,3)};
+        var tr = { bounds: new OpenLayers.Bounds(2,3,3,4)};
         layer.grid = [ [6, tr], 
                        [bl, 7]];
 
@@ -122,6 +166,16 @@
         layer.grid = [ [ singleTile ] ];
         bounds = layer.getTilesBounds();
         
+        t.ok( bounds.equals(testBounds), "getTilesBounds() returns correct bounds");
+    
+    //world wrapped around the dateline
+        var bl = { bounds: new OpenLayers.Bounds(0,-90,180,90)};
+        var tr = { bounds: new OpenLayers.Bounds(-180,-90,0,90)};
+        layer.grid = [[bl, tr]];
+
+        var bounds = layer.getTilesBounds();
+        var testBounds = new OpenLayers.Bounds(0,-90,360,90);
+    
         t.ok( bounds.equals(testBounds), "getTilesBounds() returns correct bounds");
         
     }
@@ -159,13 +213,35 @@
     
     function test_Layer_Grid_moveTo(t) {
 
-    t.plan(14);
+        t.plan(17);
+
+        var origIsNative = OpenLayers.Animation.isNative;
+        OpenLayers.Animation.isNative = false;
 
         var map = new OpenLayers.Map('map');
         layer = new OpenLayers.Layer.WMS(name, url, params);
         layer.destroy = function() {}; //we're going to do funky things with the grid
         layer.applyBackBuffer = function() {}; // backbuffering isn't under test here
         map.addLayer(layer);
+        map.setCenter([-10, 0], 5);
+        
+        var log = [];
+        layer.deferMoveGriddedTiles = function() {
+            log.push("deferMoveGriddedTiles");
+            OpenLayers.Layer.WMS.prototype.deferMoveGriddedTiles.apply(this, arguments);
+        }
+        layer.moveGriddedTiles = function() {
+            log.push("moveGriddedTiles");
+            OpenLayers.Layer.WMS.prototype.moveGriddedTiles.apply(this, arguments);
+        }
+        map.moveTo([5, 0]);
+        t.eq(log[0], "moveGriddedTiles", "deferred after moveTo");
+        map.moveTo([0, 0]);
+        t.eq(log[1], "moveGriddedTiles", "deferred again after another moveTo");
+        t.eq(log.length, 2, "no tiles loaded yet");
+        t.delay_call(0.1, function() {
+            t.eq(log[2], "deferMoveGriddedTiles", "tiles moved after tileLoadingDelay");
+        });
 
     //make sure null bounds doesnt cause script error. 
     // no test necessary, just action
@@ -173,7 +249,6 @@
         layer.singleTile = false;
         layer.moveTo(); //checks to make sure null bounds doesnt break us
   
-
 
       //observing globals
         layer.initSingleTile = function(bounds) {
@@ -184,10 +259,13 @@
             g_WhichFunc = "InitGridded";
             g_Bounds = bounds;
         };
-        layer._moveGriddedTiles = function() {
+        layer.moveGriddedTiles = function() {
             g_WhichFunc = "MoveGridded";
             g_Bounds = layer.map.getExtent();
         };
+        layer.deferMoveGriddedTiles = function() {
+            g_WhichFunc = "DeferMoveGridded";
+        }
         var clearTestBounds = function() {
             g_WhichFunc = null;
             g_Bounds = null;
@@ -277,26 +355,25 @@
 
   
    //gridded
-        layer.grid = [ [ {} ] ];
+        layer.grid = [ [ {position: new OpenLayers.Pixel(0,0)} ] ];
         layer.singleTile = false;
         
+        //regular move 
+        clearTestBounds();
+        tilesBounds = new OpenLayers.Bounds(10,10,120,120);
+        g_WhichFunc = null;
+        layer.moveTo(null, zoomChanged);
+        t.eq(g_WhichFunc, "MoveGridded", "if tiles not drastically out of bounds, we call moveGriddedTile()");
+        t.ok(g_Bounds.equals(b), "if tiles not drastically out of bounds, we call moveGriddedTile() with correct bounds");
+
         // drastic pan
         clearTestBounds();
         tilesBounds = new OpenLayers.Bounds(-150,-150,-120,-120);
         layer.moveTo(null, zoomChanged);
         t.ok(g_WhichFunc == "InitGridded", "if tiles drastically out of bounds, we call initGriddedTile()");
         t.ok(g_Bounds.equals(b), "if tiles drastically out of bounds, we call initGriddedTile() with correct bounds");
-       
-        //regular move 
-        clearTestBounds();
-        tilesBounds = new OpenLayers.Bounds(10,10,120,120);
-        g_WhichFunc = null;
-        layer.moveTo(null, zoomChanged);
-        t.eq(g_WhichFunc, null, "moveGriddedTiles is delayed - not called yet");
-        t.delay_call(0.2, function() {
-            t.ok(g_WhichFunc == "MoveGridded", "if tiles not drastically out of bounds, we call moveGriddedTile()");
-            t.ok(g_Bounds.equals(b), "if tiles not drastically out of bounds, we call moveGriddedTile() with correct bounds");
-        });
+
+        OpenLayers.Animation.isNative = origIsNative;
     }
 
     /** THIS WOULD BE WHERE THE TESTS WOULD GO FOR 
@@ -386,7 +463,7 @@
         translatedPX = {};
         layer.map = {
             getLayerPxFromLonLat: function(ul) {
-                t.ok(ul.equals(desiredUL), "correct ul passed to translation");
+                t.ok(ul.lon === desiredUL.lon && ul.lat === desiredUL.lat, "correct ul passed to translation");
                 return translatedPX;        
             },
             getResolution: function() {
@@ -428,12 +505,12 @@
     }  
      
     function test_Layer_Grid_addTileMonitoringHooks(t) {
-        t.plan(14);
+        t.plan(15);
         
         layer = new OpenLayers.Layer.Grid();
         layer.events = {
-            'triggerEvent': function(str) {
-                g_events.push(str); 
+            'triggerEvent': function(str, evt) {
+                g_events.push([str, evt]);
             }
         }
                 
@@ -459,7 +536,7 @@
         g_events = [];
         tile.onLoadStart.apply(layer);
 
-        t.eq(g_events[0], "loadstart", "loadstart event triggered when numLoadingTiles is 0");
+        t.eq(g_events[0][0], "loadstart", "loadstart event triggered when numLoadingTiles is 0");
         t.eq(layer.numLoadingTiles, 1, "numLoadingTiles incremented");
 
         g_events = [];
@@ -476,7 +553,8 @@
         layer.numLoadingTiles = 2; 
         g_events = [];
         tile.onLoadEnd.apply(layer);
-        t.eq(g_events[0], "tileloaded", "tileloaded triggered when numLoadingTiles is > 0");
+        t.eq(g_events[0][0], "tileloaded", "tileloaded triggered when numLoadingTiles is > 0");
+        t.ok(g_events[0][1].tile === tile, "tile passed as tile property to event object");
         t.eq(g_events.length, 1, "loadend event not triggered when numLoadingTiles is > 0");
         t.eq(layer.numLoadingTiles, 1, "numLoadingTiles decremented");
 
@@ -484,8 +562,8 @@
         g_events = [];
         layer.grid = [[{}]]; // to prevent error in updateBackBuffer
         tile.onLoadEnd.apply(layer);
-        t.eq(g_events[0], "tileloaded", "tileloaded triggered when numLoadingTiles is 0");
-        t.eq(g_events[1], "loadend", "loadend event triggered when numLoadingTiles is 0");
+        t.eq(g_events[0][0], "tileloaded", "tileloaded triggered when numLoadingTiles is 0");
+        t.eq(g_events[1][0], "loadend", "loadend event triggered when numLoadingTiles is 0");
         t.eq(layer.numLoadingTiles, 0, "numLoadingTiles decremented");
     }
     
@@ -627,6 +705,38 @@
         layer.destroy();
         t.eq( layer.grid, null, "layer.grid is null after destroy" );
         t.eq( layer.tileSize, null, "layer.tileSize is null after destroy" );
+    }
+
+    function test_setOpacity(t) {
+
+        t.plan(5);
+
+        var map = new OpenLayers.Map('map');
+        var layer = new OpenLayers.Layer.WMS('', '', {}, {
+            isBaseLayer: true,
+            opacity: '0.6'
+        });
+        map.addLayer(layer);
+        // setCenter adds tiles to the layer's grid
+        map.setCenter(new OpenLayers.LonLat(0, 0), 5);
+
+        var tile = layer.grid[0][0], tileImg = tile.imgDiv;
+
+        tile.onImageLoad(); // simulate an image load event
+        t.eq(layer.opacity, '0.6', 'layer opacity value is correct');
+        t.eq(parseFloat(tileImg.style.opacity), 0.6, 'tile opacity is correct');
+
+        layer.setOpacity('0.2');
+        t.eq(layer.opacity, '0.2', 'layer opacity value is correct');
+        t.eq(parseFloat(tileImg.style.opacity), 0.2, 'tile opacity is correct');
+
+        tile = layer.addTile(new OpenLayers.Bounds(1, 2, 3, 4),
+                             new OpenLayers.Pixel(5, 6));
+        tile.draw(); // add tile to the grid
+        tile.onImageLoad(); // simulate an image load event
+        t.eq(parseFloat(tile.imgDiv.style.opacity), 0.2, "tile opacity is correc");
+
+        map.destroy();
     }
     
     function test_getServerResolution(t) {
@@ -906,7 +1016,7 @@
     }
 
     function test_applyBackBuffer(t) {
-        t.plan(13);
+        t.plan(16);
 
         var map = new OpenLayers.Map('map2');
         var layer = new OpenLayers.Layer.WMS('', '', {}, {
@@ -969,6 +1079,24 @@
         t.eq(layer.backBuffer.style.top, '295%',
              'back buffer has correct top');
 
+        // test #4
+        // and a back buffer in the layer and do as if back buffer removal
+        // has been scheduled, and test that applyBackBuffer removes the
+        // back buffer and clears the timer
+        layer.createBackBuffer = function() {
+            return;
+        };
+        backBuffer = document.createElement('div');
+        layer.div.insertBefore(backBuffer, layer.div.firstChild);
+        layer.backBuffer = backBuffer;
+        layer.backBufferTimerId = 'fake';
+        layer.applyBackBuffer(2);
+        t.ok(backBuffer.parentNode !== layer.div,
+             'back buffer is not child node of layer div');
+        t.eq(layer.backBuffer, null,
+             'back buffer not set in layer');
+        t.eq(layer.backBufferTimerId, null,
+             'back buffer timer cleared');
         map.destroy();
     }
 
@@ -1015,7 +1143,7 @@
     }
 
     function test_removeBackBuffer(t) {
-        t.plan(3);
+        t.plan(4);
 
         var map = new OpenLayers.Map('map');
         var layer = new OpenLayers.Layer.WMS('', '', {}, {isBaseLayer: true});
@@ -1027,12 +1155,17 @@
         layer.div.appendChild(backBuffer);
         layer.backBufferResolution = 32;
 
+        // add a fake back buffer removal timer
+        layer.backBufferTimerId = 'fake';
+
         layer.removeBackBuffer();
         t.eq(layer.backBuffer, null, 'backBuffer set to null in layer');
         t.eq(layer.backBufferResolution, null,
              'backBufferResolution set to null in layer');
         t.ok(backBuffer.parentNode !== layer.div,
              'back buffer removed from layer');
+        t.eq(layer.backBufferTimerId, null,
+             'backBufferTimerId set to null in layer');
 
         map.destroy();
     }
@@ -1171,6 +1304,53 @@
         //
 
         map.destroy();
+    }
+
+    function test_delayed_back_buffer_removal(t) {
+
+        //
+        // Test that the delaying of the back buffer removal behaves
+        // as expected.
+        //
+
+        t.plan(5);
+
+        // set up
+
+        var map = new OpenLayers.Map('map', {
+            resolutions: [32, 16, 8, 4, 2, 1]
+        });
+        var layer = new OpenLayers.Layer.WMS('', '', {}, {
+            isBaseLayer: true,
+            transitionEffect: 'resize'
+        });
+        map.addLayer(layer);
+        map.setCenter(new OpenLayers.LonLat(0, 0), 0);
+
+        map.zoomTo(1);
+
+        t.delay_call(1, function() {
+
+            t.ok(layer.backBuffer.parentNode === layer.div,
+                 '[a] back buffer is a child of layer div');
+            t.ok(layer.backBufferTimerId !== null,
+                 '[a] back buffer scheduled for removal');
+
+            var backBuffer = layer.backBuffer;
+
+            map.zoomTo(2);
+
+            t.ok(layer.backBuffer !== backBuffer,
+                 '[b] a new back buffer was created');
+            t.ok(layer.backBuffer.parentNode === layer.div,
+                 '[b] back buffer is a child of layer div');
+            t.ok(layer.backBufferTimerId === null,
+                 '[b] back buffer no longer scheduled for removal');
+
+            // tear down
+
+            map.destroy();
+        });
     }
   </script>
 </head>

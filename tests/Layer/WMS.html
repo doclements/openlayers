@@ -5,6 +5,9 @@
     <script type="text/javascript">window.alert = oldAlert;</script>
 <script src="../OLLoader.js"></script>
   <script type="text/javascript">
+    // turn off animation frame handling, so we can check img urls in tests
+    delete OpenLayers.Layer.Grid.prototype.queueTileDraw;
+
     var isMozilla = (navigator.userAgent.indexOf("compatible") == -1);
     var layer;
 
@@ -86,10 +89,10 @@
         t.eq( tile.url,
              layer.getFullRequestString(tParams),
              "image src is created correctly via addtile" );
-        t.eq( tile.frame.style.top, "6%", "image top is set correctly via addtile" );
-        t.eq( tile.frame.style.left, "5%", "image top is set correctly via addtile" );
+        t.eq( tile.getTile().style.top, "6%", "image top is set correctly via addtile" );
+        t.eq( tile.getTile().style.left, "5%", "image top is set correctly via addtile" );
 
-        var firstChild = layer.div.firstChild.firstChild;
+        var firstChild = layer.div.firstChild;
         t.eq( firstChild.nodeName.toLowerCase(), "img", "div first child is an image object" );
         t.ok( firstChild == img, "div first child is correct image object" );
         t.eq( tile.position.toString(), "x=5,y=6", "Position of tile is set correctly." );
@@ -117,10 +120,10 @@
         t.eq( tile.url,
              layer.getFullRequestString(tParams),
              "image src is created correctly via addtile" );
-        t.eq( tile.frame.style.top, "6%", "image top is set correctly via addtile" );
-        t.eq( tile.frame.style.left, "5%", "image top is set correctly via addtile" );
+        t.eq( tile.getTile().style.top, "6%", "image top is set correctly via addtile" );
+        t.eq( tile.getTile().style.left, "5%", "image top is set correctly via addtile" );
 
-        var firstChild = layer.div.firstChild.firstChild;
+        var firstChild = layer.div.firstChild;
         t.eq( firstChild.nodeName.toLowerCase(), "img", "div first child is an image object" );
         t.ok( firstChild, img, "div first child is correct image object" );
         t.eq( tile.position.toString(), "x=5,y=6", "Position of tile is set correctly." );
@@ -271,30 +274,24 @@
 
     }
 
-    function test_Layer_WMS_setOpacity (t) {
-        t.plan( 5 );
+    function test_setOpacity(t) {
+        t.plan(1);
 
-        var map = new OpenLayers.Map('map');
-        map.projection = "xx";
-        tUrl = "http://octo.metacarta.com/cgi-bin/mapserv";
-        tParams = { layers: 'basic',
-                   format: 'image/png'};
-        tOptions = { 'opacity': '0.5' };
-        var tLayer = new OpenLayers.Layer.WMS(name, tUrl, tParams, tOptions);
-        map.addLayer(tLayer);
+        var layer = new OpenLayers.Layer.WMS(
+            null, "/bogus/wms", {layers: "mylayer"}
+        );
+        var map = new OpenLayers.Map("map");
+        map.addLayer(layer);
+        
         map.zoomToMaxExtent();
-        t.eq(tLayer.opacity, "0.5", "Opacity is set correctly");
-        t.eq(parseFloat(tLayer.div.firstChild.firstChild.style.opacity), 0.5, "Opacity on tile is correct");
-        tLayer.setOpacity("0.6");
-        t.eq(tLayer.opacity, "0.6", "setOpacity works properly");
-        t.eq(parseFloat(tLayer.div.firstChild.firstChild.style.opacity), 0.6, "Opacity on tile is changed correctly");
-        var pixel = new OpenLayers.Pixel(5,6);
-        var tile = tLayer.addTile(new OpenLayers.Bounds(1,2,3,4), pixel);
-        tile.draw();
-        t.eq(parseFloat(tile.imgDiv.style.opacity), 0.6, "Tile opacity is set correctly");
-
-        map.destroy();
+        
+        layer.setOpacity(0.5);
+        t.delay_call(1, function() {
+            t.eq(parseFloat(layer.div.firstChild.style.opacity), 0.5, "opacity set");
+            map.destroy();
+        });
     }
+
 
     function test_Layer_WMS_noGutters (t) {
         t.plan(2);
@@ -391,6 +388,7 @@
         var map = new OpenLayers.Map({
             div: "map",
             maxExtent: new OpenLayers.Bounds(-185, -95, 185, 95),
+            maxResolution: 1.40625,
             layers: [dummy, unconstrained, constrained],
             center: new OpenLayers.LonLat(0, 0),
             zoom: 1
